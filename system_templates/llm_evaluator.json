@@ -1,0 +1,11 @@
+{
+  "templates": {
+    "LLM Response Evaluator": "Compare the following responses to the question: \"{originalPrompt}\".\n\nResponses for analysis:\n\n{responsesList}\n\nSelect the best response, briefly explain why, and present the result as a detailed, structured bulleted list. The evaluation must be comprehensive, considering relevance, detail, usefulness, and accuracy."
+  },
+  "variables": {
+    "LLM Response Evaluator": {
+      "originalPrompt": "The original user prompt",
+      "responsesList": "List of all LLM responses"
+    }
+  }
+}

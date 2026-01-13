@@ -1,0 +1,1460 @@
+// content-deepseek-v6-final.js – AllCopy v6 "Adaptive Resilient Hybrid"
+// SINGLE INSTANCE ENFORCED
+
+// ============================== ЖЕЛЕЗНАЯ БЛОКИРОВКА ==============================
+(function () {
+  'use strict';
+  
+  // Проверка ВСЕХ возможных guard-переменных
+  const guards = [
+    'deepseekContentScriptLoaded',
+    'deepseekContentScriptLoaded_v6',
+    'grokContentScriptLoaded',
+    '__deepseekAllCopyV6',
+    '__deepseekInit'
+  ];
+  
+  const resolveExtensionVersion = () => {
+    try {
+      return chrome?.runtime?.getManifest?.()?.version || 'unknown';
+    } catch (_) {
+      return 'unknown';
+    }
+  };
+  for (const guard of guards) {
+    if (window[guard]) {
+      console.error(`[BLOCKED] Duplicate load detected via ${guard}`);
+      return; // ЖЁСТКИЙ ВЫХОД без throw (предотвращает cascade errors)
+    }
+  }
+  
+  // Установка ВСЕХ guard-флагов
+  const guardMetadata = {
+    timestamp: Date.now(),
+    version: resolveExtensionVersion(),
+    source: 'content-deepseek'
+  };
+  guards.forEach(g => window[g] = guardMetadata);
+  
+  console.log('%c[content-deepseek-v6] 🚀 SINGLE INSTANCE INITIALIZED', 'color: #00ff00; font-weight: bold;');
+  
+  const MODEL = 'DeepSeek';
+  const getHumanoid = () => (typeof window !== 'undefined' ? window.Humanoid : null);
+  const getLifecycleMode = () => {
+    if (typeof window !== 'undefined') {
+      if (window.__humanoidActivityMode) return window.__humanoidActivityMode;
+      if (document?.visibilityState === 'hidden') return 'background';
+    }
+    return 'interactive';
+  };
+  // Pragmatist integration
+  const prag = window.__PragmatistAdapter;
+  const getPragSessionId = () => prag?.sessionId;
+  const getPragPlatform = () => prag?.adapter?.name || 'deepseek';
+  const pipelineOverrides = prag
+    ? { sessionId: getPragSessionId(), platform: getPragPlatform(), llmName: MODEL }
+    : { llmName: MODEL };
+  const buildInlineHtml = (node) => {
+    if (!node) return '';
+    const builder = window.ContentUtils?.buildInlineHtml;
+    if (typeof builder === 'function') {
+      return String(builder(node, { includeRoot: true }) || '').trim();
+    }
+    return String(node.innerHTML || '').trim();
+  };
+  const normalizeResponsePayload = (resp, fallbackHtml = '') => {
+    if (resp && typeof resp === 'object') {
+      return {
+        text: String(resp.text || resp.answer || ''),
+        html: String(resp.html || resp.answerHtml || fallbackHtml || '')
+      };
+    }
+    return {
+      text: String(resp ?? ''),
+      html: String(fallbackHtml || '')
+    };
+  };
+  let lastResponseHtml = '';
+const buildLifecycleContext = (prompt = '', extra = {}) => ({
+  promptLength: prompt?.length || 0,
+  evaluator: Boolean(extra.evaluator),
+  mode: extra.mode || getLifecycleMode()
+});
+  const getForceStopRegistry = () => {
+    if (window.__humanoidForceStopRegistry) {
+      return window.__humanoidForceStopRegistry;
+    }
+    const handlers = new Set();
+    window.__humanoidForceStopRegistry = {
+      register(handler) {
+        if (typeof handler !== 'function') return () => {};
+        handlers.add(handler);
+        return () => handlers.delete(handler);
+      },
+      run(reason) {
+        handlers.forEach((fn) => {
+          try { fn(reason); } catch (_) {}
+        });
+      }
+    };
+    return window.__humanoidForceStopRegistry;
+  };
+  const registerForceStopHandler = (handler) => getForceStopRegistry().register(handler);
+  const handleForceStopMessage = (traceId) => {
+    if (traceId && window.HumanoidEvents?.stop) {
+      try {
+        window.HumanoidEvents.stop(traceId, { status: 'forced', reason: 'background-force-stop' });
+      } catch (_) {}
+    }
+    getForceStopRegistry().run('background-force-stop');
+  };
+
+  const cleanupScope = window.HumanoidCleanup?.createScope?.(`${MODEL.toLowerCase()}-content`) || {
+    trackInterval: (id) => id,
+    trackTimeout: (id) => id,
+    trackObserver: (observer) => observer,
+    trackAbortController: (controller) => controller,
+    register: () => () => {},
+    addEventListener: () => () => {},
+    cleanup: () => {},
+    isCleaned: () => false,
+    getReason: () => null
+  };
+  let scriptStopped = false;
+  const stopContentScript = (reason = 'manual-stop') => {
+    if (scriptStopped) return cleanupScope.getReason?.() || reason;
+    scriptStopped = true;
+    console.warn('[content-deepseek] Cleanup triggered:', reason);
+    try {
+      getForceStopRegistry().run(reason);
+    } catch (_) {}
+    try {
+      cleanupScope.cleanup?.(reason);
+    } catch (err) {
+      console.warn('[content-deepseek] Cleanup scope failed', err);
+    }
+    try {
+      guards.forEach((guard) => {
+        try { delete window[guard]; } catch (_) { window[guard] = null; }
+      });
+    } catch (_) {}
+    return reason;
+  };
+  window.__cleanup_deepseek = stopContentScript;
+  cleanupScope.addEventListener?.(window, 'pagehide', () => stopContentScript('pagehide'));
+  cleanupScope.addEventListener?.(window, 'beforeunload', () => stopContentScript('beforeunload'));
+
+  async function deepseekHumanRead(duration = 520) {
+    const humanoid = getHumanoid();
+    if (humanoid?.readPage) {
+      try {
+        await humanoid.readPage(duration);
+      } catch (err) {
+        console.warn('[DeepSeek] Humanoid.readPage failed', err);
+      }
+    }
+  }
+
+  async function deepseekHumanClick(element) {
+    const humanoid = getHumanoid();
+    if (!element) return;
+    if (humanoid?.click) {
+      try {
+        await humanoid.click(element);
+        return;
+      } catch (err) {
+        console.warn('[DeepSeek] Humanoid.click failed', err);
+      }
+    }
+    element.click();
+  }
+
+  async function fallbackDeepseekType(input, text) {
+    try {
+      input.focus({ preventScroll: true });
+    } catch (_) {
+      input.focus?.();
+    }
+    await sleep(150);
+    try {
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, text);
+    } catch {
+      // ignore
+    }
+    if ('value' in input) {
+      input.value = text;
+    } else {
+      input.textContent = text;
+    }
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(250);
+  }
+
+  async function deepseekHumanType(input, text, options = {}) {
+    const humanoid = getHumanoid();
+    if (humanoid?.typeText) {
+      try {
+        await humanoid.typeText(input, text, options);
+        return;
+      } catch (err) {
+        console.warn('[DeepSeek] Humanoid.typeText failed', err);
+      }
+    }
+    await fallbackDeepseekType(input, text);
+  }
+
+  const startDriftFallback = (intensity = 'soft') => {
+    const humanoid = getHumanoid();
+    if (humanoid?.startAntiSleepDrift) {
+      humanoid.startAntiSleepDrift(intensity);
+      return;
+    }
+    const delta = intensity === 'hard' ? 24 : intensity === 'medium' ? 16 : 10;
+    window.scrollBy({ top: (Math.random() > 0.5 ? 1 : -1) * delta, behavior: 'auto' });
+  };
+
+  const stopDriftFallback = () => {
+    const humanoid = getHumanoid();
+    humanoid?.stopAntiSleepDrift?.();
+  };
+
+  const createKeepAliveHeartbeat = (source) => {
+    let traceId = null;
+    let cleanupTimer = null;
+    return (meta = {}) => {
+      const lifecycle = window.HumanoidEvents;
+      if (!lifecycle?.start) return;
+      if (!traceId) {
+        try {
+          traceId = lifecycle.start(source, { mode: 'anti-sleep', source });
+        } catch (err) {
+          console.warn(`[${source}] keepalive trace failed`, err);
+          return;
+        }
+      }
+      try {
+        lifecycle.heartbeat(traceId, meta.progress || 0, Object.assign({ phase: 'keepalive-pulse' }, meta));
+      } catch (err) {
+        console.warn(`[${source}] keepalive heartbeat failed`, err);
+      }
+      if (cleanupTimer) clearTimeout(cleanupTimer);
+      cleanupTimer = setTimeout(() => {
+        try { lifecycle.stop(traceId, { status: 'idle' }); } catch (_) {}
+        traceId = null;
+      }, 8000);
+    };
+  };
+  const emitKeepAliveHeartbeat = createKeepAliveHeartbeat(`${MODEL.toLowerCase()}:keepalive`);
+
+  const runLifecycle = (source, context, executor) => {
+    if (typeof window.withHumanoidActivity === 'function') {
+      return window.withHumanoidActivity(source, context, executor);
+    }
+    return executor({
+      traceId: null,
+      heartbeat: () => {},
+      stop: () => {},
+      error: () => {}
+    });
+  };
+
+  const runAntiSleepPulse = (intensity = 'soft') => {
+    emitKeepAliveHeartbeat({ action: 'keep-alive-ping', intensity, model: MODEL });
+    const delta = intensity === 'hard' ? 28 : intensity === 'medium' ? 16 : 8;
+    try {
+      const Toolkit = window.__UniversalScrollToolkit;
+      if (Toolkit) {
+        const tk = new Toolkit({ idleThreshold: 800, driftStepMs: 40 });
+        tk.keepAliveTick?.((Math.random() > 0.5 ? 1 : -1) * delta);
+        return;
+      }
+    } catch (_) {}
+    startDriftFallback(intensity);
+  };
+
+  window.setupHumanoidFetchMonitor?.(MODEL, ({ status, retryAfter, url }) => {
+    if (status !== 429) return;
+    const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 || 60000 : 60000;
+    console.error('[content-deepseek] HTTP 429 detected for', url || 'unknown');
+    chrome.runtime.sendMessage({
+      type: 'LLM_RESPONSE',
+      llmName: MODEL,
+      answer: 'Error: Rate limit detected. Please wait.',
+      error: { 
+        type: 'rate_limit', 
+        message: `HTTP 429 detected. Suggested wait time: ${waitTime}ms`,
+        waitTime
+      }
+    });
+  });
+
+  // -------------------- Utils --------------------
+  const sleep = (ms) => (window.ContentUtils?.sleep ? window.ContentUtils.sleep(ms) : new Promise((r) => setTimeout(r, ms)));
+  const isUserInteracting = () => {
+    if (document.hidden) return true;
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+  };
+  const keepAliveMutex = (() => {
+    const key = '__keepAliveMutex';
+    if (window[key]) return window[key];
+    let locked = false;
+    const queue = [];
+    const run = async (fn) => {
+      if (locked) await new Promise((res) => queue.push(res));
+      locked = true;
+      try { return await fn(); } finally {
+        locked = false;
+        const next = queue.shift();
+        if (next) next();
+      }
+    };
+  const mutex = { run };
+  window[key] = mutex;
+  return mutex;
+})();
+
+  const pipelineExpectedLength = (text = '') => {
+    const len = (text || '').length;
+    if (len > 4000) return 'veryLong';
+    if (len > 2000) return 'long';
+    if (len > 800) return 'medium';
+    return 'short';
+  };
+
+  const DEEPSEEK_FALLBACK_LAST_MESSAGE_SELECTORS = [
+    '.message-item[data-role="assistant"]',
+    'div[class*="assistant"]',
+    '[data-role="assistant"]',
+    '.assistant-message',
+    '.message-content',
+    '.markdown-body',
+    '[class*="message" i][class*="assistant" i]',
+    '[class*="response" i]',
+    'article',
+    '.prose'
+  ];
+
+  function grabLatestAssistantText() {
+    try {
+      const selectorsFromBundle = (window.AnswerPipelineSelectors?.PLATFORM_SELECTORS?.deepseek?.lastMessage
+        ? [window.AnswerPipelineSelectors.PLATFORM_SELECTORS.deepseek.lastMessage]
+        : []).flat().filter(Boolean);
+      const candidates = selectorsFromBundle.length ? selectorsFromBundle : DEEPSEEK_FALLBACK_LAST_MESSAGE_SELECTORS;
+      const nodes = [];
+      const seen = new Set();
+      const pushUnique = (el) => {
+        if (!el || el.nodeType !== 1) return;
+        if (seen.has(el)) return;
+        seen.add(el);
+        nodes.push(el);
+      };
+      for (const sel of candidates) {
+        try {
+          document.querySelectorAll(sel).forEach(pushUnique);
+        } catch (_) {}
+      }
+      if (!nodes.length) return { text: '', html: '', node: null };
+      const normalizeText = (node) => String(node?.innerText || node?.textContent || '').trim();
+      const sorted = nodes.slice().sort((a, b) => {
+        if (a === b) return 0;
+        try {
+          const pos = a.compareDocumentPosition(b);
+          if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+          if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+        } catch (_) {}
+        return 0;
+      });
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const node = sorted[i];
+        const text = normalizeText(node);
+        const html = buildInlineHtml(node);
+        if (text || html) return { text, html, node };
+      }
+    } catch (err) {
+      console.warn('[DeepSeek] grabLatestAssistantText failed', err);
+    }
+    return { text: '', html: '', node: null };
+  }
+
+  async function tryDeepseekPipeline(promptText = '', lifecycle = {}) {
+    const { heartbeat, stop } = lifecycle || {};
+    if (!window.UnifiedAnswerPipeline) return null;
+    heartbeat?.({
+      stage: 'start',
+      expectedLength: pipelineExpectedLength(promptText),
+      pipeline: 'UnifiedAnswerPipeline'
+    });
+    try {
+      const pipeline = new window.UnifiedAnswerPipeline('deepseek', Object.assign({
+        expectedLength: pipelineExpectedLength(promptText)
+      }, pipelineOverrides));
+      const result = await pipeline.execute();
+      if (result?.success && result.answer) {
+        heartbeat?.({
+          stage: 'success',
+          answerLength: result.answer.length,
+          pipeline: 'UnifiedAnswerPipeline'
+        });
+        if (typeof stop === 'function') {
+          await stop({
+            status: 'success',
+            source: 'pipeline',
+            answer: result.answer,
+            answerHtml: result.answerHtml || '',
+            answerLength: result.answer.length
+          });
+        }
+        return result;
+      }
+      heartbeat?.({
+        stage: 'empty',
+        status: 'no-answer',
+        pipeline: 'UnifiedAnswerPipeline'
+      });
+    } catch (err) {
+      heartbeat?.({
+        stage: 'error',
+        error: err?.message || String(err),
+        pipeline: 'UnifiedAnswerPipeline'
+      });
+      console.warn('[DeepSeek] UnifiedAnswerPipeline failed, reverting to legacy reply watcher', err);
+    }
+    return null;
+  }
+
+  function isElementInteractable(el) {
+  if (window.ContentUtils?.isElementInteractable) return window.ContentUtils.isElementInteractable(el);
+    if (!el) return false;
+    if (el.offsetParent === null) return false;
+    if (el.getAttribute && el.getAttribute('disabled') !== null) return false;
+    const style = el.style || {};
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect?.();
+    if (!rect) return true;
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    return rect.bottom >= 0 && rect.right >= 0 && rect.top <= vh && rect.left <= vw;
+  }
+
+  async function findAndCacheElement(selectorKey, selectorArray, timeout = 30000, scope = document) {
+  if (window.ContentUtils?.findAndCacheElement) {
+    const found = await window.ContentUtils.findAndCacheElement(selectorKey, selectorArray, { timeout, scope, model: (typeof MODEL !== 'undefined' ? MODEL : 'generic'), metricsCollector });
+    if (found) return found;
+  }
+
+    const opId = metricsCollector.startOperation(`findElement_${selectorKey}`);
+    const storageKey = `selector_cache_${MODEL}_${selectorKey}`;
+    try {
+      const existing = await chrome.storage.local.get(storageKey);
+      const cached = existing[storageKey];
+      if (cached) {
+        const el = scope.querySelector(cached);
+        if (isElementInteractable(el)) {
+          console.log(`[Self-Healing] Cache hit: ${cached}`);
+          metricsCollector.recordSelectorEvent('cache_hit');
+          metricsCollector.endOperation(opId, true, { cached: true, selector: cached });
+          return el;
+        }
+      }
+    } catch (_) {}
+    const start = Date.now();
+    let attempt = 0;
+    const baseDelay = 200;
+    const maxDelay = 5000;
+    while (Date.now() - start < timeout) {
+      for (const sel of selectorArray) {
+        try {
+          const el = scope.querySelector(sel);
+          if (isElementInteractable(el)) {
+            try { await chrome.storage.local.set({ [storageKey]: sel }); } catch (_) {}
+            console.log(`[Self-Healing] Found: ${sel}`);
+            metricsCollector.recordSelectorEvent('hit');
+            metricsCollector.endOperation(opId, true, { selector: sel, attempts: attempt + 1 });
+            return el;
+          }
+        } catch (e) {
+          console.warn(`[Self-Healing] Bad selector: ${sel}`);
+        }
+      }
+      const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+      await sleep(delay);
+      attempt++;
+    }
+    metricsCollector.recordSelectorEvent('miss');
+    metricsCollector.endOperation(opId, false, { attempts: attempt });
+    throw new Error(`Element not found: ${selectorKey}`);
+  }
+
+  async function copyTextToClipboard(text) {
+    if (!text) return false;
+    if (navigator?.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        console.log('[DeepSeek] Response copied via clipboard API');
+        return true;
+      } catch (err) {
+        console.warn('[DeepSeek] clipboard API failed, using fallback', err);
+      }
+    }
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      textarea.style.pointerEvents = 'none';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const success = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      if (success) {
+        console.log('[DeepSeek] Response copied via execCommand fallback');
+        return true;
+      }
+    } catch (fallbackErr) {
+      console.warn('[DeepSeek] Fallback copy failed', fallbackErr);
+    }
+    return false;
+  }
+
+  // -------------------- SmartScroll / KeepAlive --------------------
+  const deepSeekScrollCoordinator = window.ScrollCoordinator
+    ? new window.ScrollCoordinator({
+        source: `${MODEL.toLowerCase()}-smart-scroll`,
+        getLifecycleMode,
+        registerForceStopHandler,
+        startDrift: () => startDriftFallback('soft'),
+        stopDrift: () => stopDriftFallback(),
+        logPrefix: `[${MODEL}] SmartScroll`
+      })
+    : null;
+
+  const resolveScrollCoordinator = () => {
+    const candidates = [
+      () => (typeof deepSeekScrollCoordinator !== 'undefined' ? deepSeekScrollCoordinator : null),
+      () => (typeof leChatScrollCoordinator !== 'undefined' ? leChatScrollCoordinator : null),
+      () => (typeof qwenScrollCoordinator !== 'undefined' ? qwenScrollCoordinator : null),
+      () => (typeof claudeScrollCoordinator !== 'undefined' ? claudeScrollCoordinator : null),
+      () => (typeof grokScrollCoordinator !== 'undefined' ? grokScrollCoordinator : null)
+    ];
+    for (const pick of candidates) {
+      const coord = pick();
+      if (coord) return coord;
+    }
+    return null;
+  };
+
+  async function withSmartScroll(asyncOperation, options = {}) {
+    const coordinator = resolveScrollCoordinator();
+    if (window.ContentUtils?.withSmartScroll) {
+      return window.ContentUtils.withSmartScroll(asyncOperation, { coordinator, ...options });
+    }
+    if (coordinator?.run) {
+      return coordinator.run(asyncOperation, options);
+    }
+    return asyncOperation();
+  }
+
+  // -------------------- ContentCleaner --------------------
+  class ContentCleaner {
+    constructor() {
+      this.rules = this._initRules();
+      this.stats = { elementsRemoved: 0, charactersRemoved: 0, rulesApplied: 0 };
+    }
+    _initRules() {
+      return {
+        uiPhrases: [
+          /\b(Send|Menu|Settings|New chat|Clear|Like|Reply|Copy|Share|Follow|Subscribe)\b/gi,
+          /\b(Upload|Download|Save|Delete|Edit|Search|Filter|Sort)\b/gi,
+          /\b(DeepSeek|ChatGPT|Claude|Gemini|Perplexity|GPT)\b/gi
+        ],
+        timePatterns: [
+          /\b\d{1,2}:\d{2}\s*(AM|PM)?\b/gi,
+          /\b\d+\s*(hours?|minutes?|seconds?)\s*ago\b/gi,
+          /\b(Just now|Yesterday|Today|Tomorrow)\b/gi
+        ],
+        formatting: [/\xa0/g, /&nbsp;/g, /&[a-z]+;/gi],
+        urls: [/\bhttps?:\/\/[^\s<>"]+\b/gi, /\bwww\.[^\s<>"]+\b/gi],
+        stripTags: [/<!--[\s\S]*?-->/g]
+      };
+    }
+    clean(content, options = {}) {
+      this.stats = { elementsRemoved: 0, charactersRemoved: 0, rulesApplied: 0 };
+
+      const isHtml = /<\/?[a-z][\s\S]*>/i.test(content);
+      let text = content;
+
+      if (isHtml) {
+        try {
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(content, 'text/html');
+          doc.querySelectorAll('script,style,svg,canvas,noscript,header,footer,nav,aside,[aria-hidden="true"]').forEach(el => {
+            this.stats.elementsRemoved++;
+            this.stats.charactersRemoved += (el.textContent || '').length;
+            el.remove();
+          });
+          text = doc.body?.textContent || '';
+        } catch (err) {
+          console.warn('[ContentCleaner] DOMParser failed in DeepSeek cleaner, falling back to text extraction', err);
+          const div = document.createElement('div');
+          div.textContent = content;
+          text = div.textContent || '';
+        }
+      }
+
+      const patterns = [
+        ...this.rules.uiPhrases,
+        ...this.rules.timePatterns,
+        ...this.rules.urls,
+        ...this.rules.formatting,
+        ...this.rules.stripTags
+      ];
+
+      let out = text;
+      for (const p of patterns) {
+        const before = out.length;
+        out = out.replace(p, ' ');
+        const diff = before - out.length;
+        if (diff > 0) {
+          this.stats.rulesApplied++;
+          this.stats.charactersRemoved += diff;
+        }
+      }
+
+      out = out.replace(/\n\s*\n\s*\n/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+
+      const maxLength = options.maxLength || null;
+      if (maxLength && out.length > maxLength) {
+        const truncated = out.slice(0, maxLength);
+        const cutAt = Math.max(truncated.lastIndexOf('. '), truncated.lastIndexOf('\n\n'));
+        out = (cutAt > maxLength * 0.7 ? truncated.slice(0, cutAt + 1) : truncated) + '\n\n[Content truncated]';
+      }
+      return out;
+    }
+    getStats() { return { ...this.stats }; }
+  }
+  const contentCleaner = new ContentCleaner();
+
+  // -------------------- Metrics Collection System --------------------
+  class MetricsCollector {
+    constructor() {
+      this.metrics = {
+        operations: [],
+        selectors: { hits: 0, misses: 0, cacheHits: 0 },
+        timings: {},
+        errors: []
+      };
+      this.startTime = Date.now();
+    }
+    startOperation(name, context = {}) {
+      const id = `${name}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const operation = {
+        id,
+        name,
+        start: Date.now(),
+        end: null,
+        success: null,
+        metadata: context || {},
+        lifecycleTraceId: null
+      };
+      const events = window.HumanoidEvents;
+      if (events?.start) {
+        try {
+          operation.lifecycleTraceId = events.start(`metrics:${name}`, {
+            mode: getLifecycleMode(),
+            operation: name
+          });
+        } catch (_) {}
+      }
+      this.metrics.operations.push(operation);
+      return id;
+    }
+    endOperation(id, success = true, metadata = {}) {
+      const op = this.metrics.operations.find(o => o.id === id);
+      if (op) {
+        op.end = Date.now();
+        op.duration = op.end - op.start;
+        op.success = success;
+        op.metadata = metadata;
+        if (op.lifecycleTraceId && window.HumanoidEvents?.stop) {
+          try {
+            window.HumanoidEvents.stop(op.lifecycleTraceId, {
+              status: success ? 'success' : 'failed',
+              metadata
+            });
+          } catch (_) {}
+          op.lifecycleTraceId = null;
+        }
+      }
+    }
+    recordSelectorEvent(type) {
+      if (type === 'hit') this.metrics.selectors.hits++;
+      else if (type === 'miss') this.metrics.selectors.misses++;
+      else if (type === 'cache_hit') this.metrics.selectors.cacheHits++;
+    }
+    recordTiming(key, duration) {
+      if (!this.metrics.timings[key]) this.metrics.timings[key] = [];
+      this.metrics.timings[key].push(duration);
+    }
+    recordError(error, context = '', operationId = null) {
+      this.metrics.errors.push({
+        message: error?.message || String(error),
+        context,
+        timestamp: Date.now(),
+        type: error?.type || 'unknown'
+      });
+      if (operationId) {
+        const op = this.metrics.operations.find(o => o.id === operationId);
+        if (op?.lifecycleTraceId && window.HumanoidEvents?.error) {
+          try {
+            window.HumanoidEvents.error(op.lifecycleTraceId, error, true);
+          } catch (_) {}
+        }
+      }
+    }
+    getReport() {
+      const now = Date.now();
+      const successOps = this.metrics.operations.filter(o => o.success === true);
+      const failedOps = this.metrics.operations.filter(o => o.success === false);
+      const avgTimings = {};
+      for (const [key, values] of Object.entries(this.metrics.timings)) {
+        avgTimings[key] = values.reduce((a, b) => a + b, 0) / values.length;
+      }
+      return {
+        uptime: now - this.startTime,
+        operations: {
+          total: this.metrics.operations.length,
+          successful: successOps.length,
+          failed: failedOps.length,
+          successRate: this.metrics.operations.length > 0 
+            ? (successOps.length / this.metrics.operations.length * 100).toFixed(2) + '%'
+            : 'N/A'
+        },
+        selectors: this.metrics.selectors,
+        timings: avgTimings,
+        errors: this.metrics.errors.slice(-10),
+        timestamp: now
+      };
+    }
+    sendReport() {
+      chrome.runtime.sendMessage({
+        type: 'METRICS_REPORT',
+        llmName: MODEL,
+        metrics: this.getReport()
+      });
+    }
+  }
+  const metricsCollector = new MetricsCollector();
+  cleanupScope.trackInterval(setInterval(() => metricsCollector.sendReport(), 300000));
+
+  // -------------------- РАБОЧИЕ ФУНКЦИИ ДЛЯ DeepSeek --------------------
+  
+  const isSpeedMode = () => !!window.__PRAGMATIST_SPEED_MODE;
+
+  function readComposerValue(input) {
+    if (!input) return '';
+    try {
+      if ('value' in input) return String(input.value || '').trim();
+      return String(input.textContent || '').trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function isCaptchaField(el) {
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag !== 'textarea') return false;
+    const name = String(el.getAttribute?.('name') || '');
+    const id = String(el.getAttribute?.('id') || '');
+    return name.includes('g-recaptcha-response') || id.includes('g-recaptcha-response');
+  }
+
+  function isComposerCandidate(el) {
+    if (!el) return false;
+    if (isCaptchaField(el)) return false;
+    const aria = String(el.getAttribute?.('aria-label') || '').toLowerCase();
+    if (aria.includes('search')) return false;
+    return isElementInteractable(el);
+  }
+
+  function getComposer() {
+    const selectors = [
+      'textarea[placeholder*="message" i]',
+      'textarea[placeholder*="ask" i]',
+      'textarea[aria-label*="message" i]',
+      'textarea[aria-label*="prompt" i]',
+      'form textarea:not([type="search"]):not([name*="g-recaptcha-response"]):not([id*="g-recaptcha-response"])',
+      '[contenteditable="true"][role="textbox"]',
+      'div[role="textbox"][contenteditable="true"]',
+      'div[contenteditable="true"][data-placeholder]'
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (isComposerCandidate(el)) return el;
+    }
+    const fallback = document.querySelector('textarea:not([name*="g-recaptcha-response"]):not([id*="g-recaptcha-response"])');
+    return isComposerCandidate(fallback) ? fallback : null;
+  }
+
+  async function resolveComposer() {
+    const direct = getComposer();
+    if (direct) return direct;
+
+    if (window.SelectorFinder?.findOrDetectSelector) {
+      try {
+        const result = await window.SelectorFinder.findOrDetectSelector({
+          modelName: MODEL,
+          elementType: 'composer',
+          timeout: 20000
+        });
+        if (result?.element && isComposerCandidate(result.element)) return result.element;
+      } catch (err) {
+        console.warn('[DeepSeek] SelectorFinder composer resolution failed', err);
+      }
+    }
+
+    try {
+      const found = await findAndCacheElement('deepseek_composer', [
+        'textarea[placeholder*="message" i]',
+        'textarea[placeholder*="ask" i]',
+        'textarea[aria-label*="message" i]',
+        'textarea[aria-label*="prompt" i]',
+        'form textarea:not([type="search"]):not([name*="g-recaptcha-response"]):not([id*="g-recaptcha-response"])',
+        '[contenteditable="true"][role="textbox"]',
+        'div[role="textbox"][contenteditable="true"]',
+        'div[contenteditable="true"][data-placeholder]'
+      ], 20000);
+      return isComposerCandidate(found) ? found : null;
+    } catch (err) {
+      console.warn('[DeepSeek] Fallback composer search failed', err);
+      return null;
+    }
+  }
+
+  async function typePrompt(input, prompt) {
+    try {
+      input.focus?.({ preventScroll: true });
+    } catch (_) {
+      try { input.focus?.(); } catch (_) {}
+    }
+    if ('value' in input) {
+      input.value = String(prompt ?? '');
+    } else {
+      input.textContent = String(prompt ?? '');
+    }
+    try {
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(prompt ?? ''), inputType: 'insertFromPaste' }));
+    } catch (_) {
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(120);
+
+    if (!readComposerValue(input)) {
+      await fallbackDeepseekType(input, prompt);
+      await sleep(180);
+    }
+  }
+
+  async function resolveSendButton(referenceInput) {
+    if (window.SelectorFinder?.findOrDetectSelector) {
+      try {
+        const result = await window.SelectorFinder.findOrDetectSelector({
+          modelName: MODEL,
+          elementType: 'sendButton',
+          timeout: 15000,
+          referenceElement: referenceInput || null
+        });
+        if (result?.element && isElementInteractable(result.element)) return result.element;
+      } catch (err) {
+        console.warn('[DeepSeek] SelectorFinder send button resolution failed', err);
+      }
+    }
+
+    const scope = referenceInput?.closest?.('form') || referenceInput?.parentElement || document;
+    const candidates = [
+      'button[aria-label*="send" i]:not([disabled])',
+      'button[aria-label*="отправ" i]:not([disabled])',
+      'button[type="submit"]:not([disabled])',
+      'button[data-testid*="send"]:not([disabled])'
+    ];
+    for (const sel of candidates) {
+      try {
+        const btn = scope.querySelector(sel);
+        if (btn && isElementInteractable(btn)) return btn;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  async function sendComposer(input) {
+    const dispatchEnter = (mods = {}) => {
+      try {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, ctrlKey: !!mods.ctrlKey }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, ctrlKey: !!mods.ctrlKey }));
+      } catch (_) {}
+    };
+
+    const baselineCount = getProseNodes().length;
+    const confirmDeepSeekSend = async (timeout = 2000) => {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        const typing = document.querySelector('[aria-busy="true"], .loading, .spinner, [data-streaming="true"]');
+        if (typing) return true;
+        if (getProseNodes().length > baselineCount) return true;
+        if (!readComposerValue(input)) return true;
+        await sleep(120);
+      }
+      return false;
+    };
+
+    await sleep(2000);
+
+    // Strategy 1: Ctrl+Enter
+    dispatchEnter({ ctrlKey: true });
+    let confirmed = await confirmDeepSeekSend(2200);
+    if (!confirmed) {
+      await sleep(400);
+      dispatchEnter({ ctrlKey: true });
+      confirmed = await confirmDeepSeekSend(2200);
+    }
+    if (!confirmed) {
+      dispatchEnter();
+      await confirmDeepSeekSend(2000);
+    }
+  }
+
+  function getProseNodes() {
+    return Array.from(document.querySelectorAll(
+      'div.group.relative prose, .prose, .markdown-body, .message-content, .assistant-message, [class*="message"][class*="assistant"], [class*="response"], article'
+    )).filter(n => (n.innerText || '').trim());
+  }
+
+  const normalizeForComparison = (text = '') => String(text)
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  async function waitForDeepSeekReply(prompt, timeout = 150000) {
+    const captureSnapshot = () => {
+      const isGenerating = document.querySelector(
+        '.typing-indicator, [data-generating="true"], [aria-busy="true"], .loader, .spinner, [data-testid="chat-response-typing"], .animate-spin'
+      );
+      const prose = getProseNodes();
+      let node = prose.length ? prose[prose.length - 1] : null;
+      if (!node) {
+        const messages = Array.from(document.querySelectorAll('[class*="message"], article, div[role="article"]'));
+        if (messages.length) {
+          node = messages[messages.length - 1];
+        }
+      }
+      if (!node) return null;
+      const text = (node.innerText || node.textContent || '').trim();
+      if (!text) return null;
+      return {
+        text,
+        normalized: normalizeForComparison(text),
+        isGenerating,
+        node
+      };
+    };
+
+    return new Promise((resolve, reject) => {
+      let lastSeen = '';
+      let lastNormalized = '';
+      let lastChangeTs = Date.now();
+      let stableTicks = 0;
+      let settled = false;
+      let stopObserve = null;
+      let observer = null;
+
+      const cleanup = (value, isTimeout = false) => {
+        if (settled) return;
+        settled = true;
+        if (stopObserve) {
+          try { stopObserve(); } catch (_) {}
+        }
+        if (observer) observer.disconnect();
+        clearInterval(intervalId);
+        clearTimeout(timerId);
+        if (value) {
+          resolve(value);
+        } else if (isTimeout && lastSeen) {
+          console.warn('[DeepSeek] Timeout, returning last text');
+          resolve(lastSeen);
+        } else {
+          reject(new Error('DeepSeek timeout'));
+        }
+      };
+
+      const evaluate = () => {
+        const snapshot = captureSnapshot();
+        if (!snapshot) return;
+        const { text, normalized, isGenerating } = snapshot;
+        if (normalized && normalized !== lastNormalized) {
+          lastNormalized = normalized;
+          lastSeen = text;
+          stableTicks = 0;
+          lastChangeTs = Date.now();
+          return;
+        }
+        if (!normalized) {
+          lastSeen = text;
+          stableTicks = 0;
+          lastChangeTs = Date.now();
+          return;
+        }
+        if (!isGenerating && text === lastSeen) {
+          stableTicks += 1;
+        } else {
+          lastSeen = text;
+          stableTicks = 0;
+          lastChangeTs = Date.now();
+          return;
+        }
+        const quietMs = Date.now() - lastChangeTs;
+        if ((!isGenerating && (stableTicks >= 2 || quietMs >= 2200)) || quietMs >= 6000) {
+          console.log('[DeepSeek] Response stabilized');
+          cleanup(text);
+        }
+      };
+
+      if (window.ContentUtils?.observeMutations) {
+        stopObserve = window.ContentUtils.observeMutations(
+          document.body,
+          { childList: true, subtree: true, characterData: true },
+          () => evaluate()
+        );
+      } else {
+        observer = cleanupScope.trackObserver(new MutationObserver(() => evaluate()));
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      }
+      const intervalId = cleanupScope.trackInterval(setInterval(() => evaluate(), 600));
+      const timerId = cleanupScope.trackTimeout(setTimeout(() => cleanup(null, true), timeout));
+      evaluate();
+    });
+  }
+
+  async function waitForElement(selectors, scope = document, timeout = 25000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      for (const sel of selectors) {
+        const el = scope.querySelector(sel);
+        if (el && el.offsetParent !== null) return el;
+      }
+      await sleep(250);
+    }
+    throw new Error(`Element not found: ${selectors.join(" | ")}`);
+  }
+
+  function sendResult(resp, ok = true, responseType = 'LLM_RESPONSE', meta = null) {
+    const { text, html } = normalizeResponsePayload(resp, lastResponseHtml);
+    if (ok) {
+      const stats = contentCleaner.getStats();
+      chrome.runtime.sendMessage({
+        type: 'CONTENT_CLEANING_STATS',
+        llmName: MODEL,
+        stats,
+        timestamp: Date.now()
+      });
+    }
+    chrome.runtime.sendMessage({
+      type: responseType,
+      llmName: MODEL,
+      answer: ok ? text : `Ошибка: ${text}`,
+      answerHtml: ok ? html : '',
+      meta: meta && typeof meta === 'object' ? meta : null
+    });
+  }
+
+  // ---- Attachment helpers ---- //
+  const parseDataUrlToBytes = (dataUrl = '') => {
+    try {
+      const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+      const base64Part = match ? match[2] : dataUrl;
+      const binary = atob(base64Part || '');
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    } catch (err) {
+      console.warn('[content-deepseek] Failed to parse data URL', err);
+      return null;
+    }
+  };
+
+  const hydrateAttachments = (raw = []) =>
+    raw
+      .map((item) => {
+        if (!item || !item.name || !item.base64) return null;
+        try {
+          const bytes = parseDataUrlToBytes(item.base64);
+          if (!bytes) return null;
+          return new File([bytes], item.name, { type: item.type || 'application/octet-stream' });
+        } catch (err) {
+          console.warn('[content-deepseek] Failed to hydrate attachment', item?.name, err);
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+  const waitForElementDynamic = async (selectors, timeoutMs = 3000, intervalMs = 150) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) return el;
+      }
+      await sleep(intervalMs);
+    }
+    return null;
+  };
+
+  let isAttaching = false;
+
+  async function attachFilesToComposer(target, attachments = []) {
+    if (!attachments || !attachments.length) return false;
+    if (isAttaching) {
+      console.warn('[DeepSeek] Attachment already in progress, skipping duplicate call');
+      return false;
+    }
+    isAttaching = true;
+    try {
+      const files = hydrateAttachments(attachments).slice(0, 5);
+      if (!files.length) return false;
+
+      const makeDataTransfer = () => {
+        const dt = new DataTransfer();
+        files.forEach((f) => {
+          try { dt.items.add(f); } catch (_) {}
+        });
+        dt.effectAllowed = 'copy';
+        return dt;
+      };
+
+      const dispatchDropSequence = async (el) => {
+        if (!el) return false;
+        const dt = makeDataTransfer();
+        try {
+          for (const type of ['dragenter', 'dragover', 'drop']) {
+            const ev = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt });
+            el.dispatchEvent(ev);
+            await sleep(40);
+          }
+          await sleep(1400);
+          return true;
+        } catch (err) {
+          console.warn('[content-deepseek] drop dispatch failed', err);
+          return false;
+        }
+      };
+
+      const dropTargets = [
+        target,
+        target?.parentElement,
+        document.querySelector('main'),
+        document.querySelector('form'),
+        document.body
+      ].filter(Boolean);
+      for (const el of dropTargets) {
+        if (await dispatchDropSequence(el)) return true;
+      }
+
+      const attachButtonSelectors = [
+        'button[aria-label*="Attach"]',
+        'button[data-testid*="attach"]',
+        'button[data-testid*="upload"]',
+        'button[aria-label*="Upload"]'
+      ];
+      const inputSelectors = [
+        'input[type="file"][accept*="image"]',
+        'input[type="file"][accept*="pdf"]',
+        'input[type="file"]'
+      ];
+
+      const attachButton = await waitForElementDynamic(attachButtonSelectors, 1200, 120);
+      if (attachButton) {
+        try { attachButton.click(); await sleep(300); } catch (_) {}
+      }
+
+      let fileInput = await waitForElementDynamic(inputSelectors, 3000, 120);
+      if (!fileInput) {
+        fileInput = document.querySelector('input[type="file"]');
+      }
+      if (!fileInput) {
+        console.warn('[content-deepseek] File input not found, skipping attachments');
+        return false;
+      }
+
+      const dt = makeDataTransfer();
+      try { fileInput.files = dt.files; } catch (err) { console.warn('[content-deepseek] set files failed', err); }
+      try {
+        fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+      } catch (err) {
+        console.warn('[content-deepseek] input/change dispatch failed', err);
+      }
+      try { fileInput.focus?.({ preventScroll: true }); } catch (_) { try { fileInput.focus?.(); } catch (_) {} }
+      await sleep(1800);
+      return true;
+    } finally {
+      isAttaching = false;
+    }
+  }
+
+  async function injectAndGetResponse(prompt, options = {}) {
+    const { autoNotify = true, responseType = 'LLM_RESPONSE', meta = null } = options;
+    const dispatchMeta = meta && typeof meta === 'object' ? meta : null;
+    return runLifecycle('deepseek:inject', buildLifecycleContext(prompt, { evaluator: options.isEvaluator }), async (activity) => {
+      const opId = metricsCollector.startOperation('injectAndGetResponse');
+      const startTime = Date.now();
+      console.log('[DeepSeek] Starting injection');
+      try {
+        await sleep(isSpeedMode() ? 250 : 1200);
+          activity.heartbeat(0.15, { phase: 'composer-search' });
+
+          const composer = await resolveComposer();
+          if (!composer) {
+            throw { type: 'selector_not_found', message: 'DeepSeek input field not found' };
+          }
+          activity.heartbeat(0.3, { phase: 'composer-ready' });
+
+          try { await attachFilesToComposer(composer, options.attachments || []); } catch (err) { console.warn('[DeepSeek] attach failed', err); }
+
+          console.log('[DeepSeek] Input found, injecting...');
+          await typePrompt(composer, prompt);
+          activity.heartbeat(0.45, { phase: 'typing-complete' });
+          
+          console.log('[DeepSeek] Sending...');
+          await sendComposer(composer);
+          activity.heartbeat(0.55, { phase: 'send-dispatched' });
+          try { chrome.runtime.sendMessage({ type: 'PROMPT_SUBMITTED', llmName: MODEL, ts: Date.now(), meta: dispatchMeta }); } catch (_) {}
+          
+          console.log('[DeepSeek] Waiting for response...');
+          activity.heartbeat(0.65, { phase: 'waiting-response' });
+
+          const responsePayload = await withSmartScroll(async () => {
+            let pipelineAnswer = null;
+            await tryDeepseekPipeline(prompt, {
+              heartbeat: (meta = {}) => activity.heartbeat(0.75, Object.assign({ phase: 'pipeline' }, meta)),
+              stop: async ({ answer, answerHtml }) => {
+                let cleanedPipeline = contentCleaner.clean(answer, { maxLength: 50000 });
+                let html = String(answerHtml || '').trim();
+                if (!String(cleanedPipeline || '').trim()) {
+                  const domFallback = grabLatestAssistantText();
+                  cleanedPipeline = contentCleaner.clean(domFallback.text || domFallback.html || '', { maxLength: 50000 });
+                  if (!html && domFallback.html) html = domFallback.html;
+                }
+                if (!String(cleanedPipeline || '').trim()) {
+                  throw new Error('Empty answer extracted');
+                }
+                if (html) lastResponseHtml = html;
+                pipelineAnswer = { text: cleanedPipeline, html };
+                copyTextToClipboard(cleanedPipeline).catch(() => {});
+                console.log('[DeepSeek] UnifiedAnswerPipeline completed, skipping legacy watcher');
+                metricsCollector.recordTiming('total_response_time', Date.now() - startTime);
+                metricsCollector.endOperation(opId, true, { 
+                  responseLength: cleanedPipeline.length,
+                  duration: Date.now() - startTime,
+                  source: 'pipeline'
+                });
+                if (autoNotify) {
+                  sendResult({ text: cleanedPipeline, html }, true, responseType, dispatchMeta);
+                }
+                activity.stop({ status: 'success', answerLength: cleanedPipeline.length, source: 'pipeline' });
+                return pipelineAnswer;
+              }
+            });
+            if (pipelineAnswer) {
+              return pipelineAnswer;
+            }
+
+            const response = await waitForDeepSeekReply(prompt, 150000);
+
+            let cleanedResponse = contentCleaner.clean(response, { maxLength: 50000 });
+            if (!String(cleanedResponse || '').trim()) {
+              const domFallback = grabLatestAssistantText();
+              cleanedResponse = contentCleaner.clean(domFallback.text || domFallback.html || '', { maxLength: 50000 });
+              if (domFallback.html) lastResponseHtml = domFallback.html;
+            }
+            if (!String(cleanedResponse || '').trim()) {
+              throw new Error('Empty answer extracted');
+            }
+            copyTextToClipboard(cleanedResponse).catch(() => {});
+            console.log(`[DeepSeek] Completed. Length: ${cleanedResponse.length}`);
+            metricsCollector.recordTiming('total_response_time', Date.now() - startTime);
+            metricsCollector.endOperation(opId, true, { 
+              responseLength: cleanedResponse.length,
+              duration: Date.now() - startTime
+            });
+            if (autoNotify) {
+              sendResult({ text: cleanedResponse, html: lastResponseHtml }, true, responseType, dispatchMeta);
+            }
+            activity.heartbeat(0.9, { phase: 'response-processed' });
+            activity.stop({ status: 'success', answerLength: cleanedResponse.length });
+            return { text: cleanedResponse, html: lastResponseHtml };
+          }, { keepAliveInterval: 2000, operationTimeout: 300000, debug: false });
+          return responsePayload;
+      } catch (error) {
+        if (error?.code === 'background-force-stop') {
+          activity.error(error, false);
+          throw error;
+        }
+        console.error('[DeepSeek] Error:', error);
+        metricsCollector.recordError(error, 'injectAndGetResponse', opId);
+        metricsCollector.endOperation(opId, false, { error: error?.message });
+        if (autoNotify) {
+          sendResult(error?.message || String(error), false, responseType, dispatchMeta);
+        }
+        activity.error(error, true);
+        throw error;
+      }
+    });
+  }
+
+  function startBasicHeartbeat() {
+    // disabled: event-driven anti-sleep only
+    return;
+  }
+
+  const onRuntimeMessage = (msg, _sender, sendResponse) => {
+    try {
+      if (!msg) return false;
+      
+      if (msg?.type === 'STOP_AND_CLEANUP') {
+        handleForceStopMessage(msg.payload?.traceId);
+        stopContentScript('manual-toggle');
+        if (typeof sendResponse === 'function') {
+          sendResponse({ status: 'cleaned', llmName: MODEL });
+        }
+        return false;
+      }
+
+      if (msg?.type === 'HUMANOID_FORCE_STOP') {
+        handleForceStopMessage(msg.payload?.traceId);
+        if (typeof sendResponse === 'function') {
+          sendResponse({ status: 'force_stop_ack' });
+        }
+        return false;
+      }
+
+      if (msg?.type === 'HEALTH_CHECK_PING') {
+        sendResponse({ type: 'HEALTH_CHECK_PONG', pingId: msg.pingId, llmName: MODEL });
+        return true;
+      }
+
+      if (msg?.type === 'ANTI_SLEEP_PING') {
+        if (window.__LLMScrollHardStop) return false;
+        if (isUserInteracting()) {
+          stopDriftFallback();
+          return false;
+        }
+        keepAliveMutex.run(async () => {
+          runAntiSleepPulse(msg.intensity || 'soft');
+        });
+        return false;
+      }
+
+      if (msg?.type === 'GET_ANSWER' || msg?.type === 'GET_FINAL_ANSWER') {
+        const responseType = msg.type === 'GET_ANSWER' ? 'LLM_RESPONSE' : 'FINAL_LLM_RESPONSE';
+
+        injectAndGetResponse(msg.prompt, { autoNotify: false, responseType, attachments: msg.attachments || [], meta: msg.meta || null })
+          .then((resp) => {
+            if (msg.isFireAndForget) {
+              console.log('[DeepSeek] Fire-and-forget processed');
+              sendResponse?.({ status: 'success_fire_and_forget' });
+              return;
+            }
+
+            const stats = contentCleaner.getStats();
+            chrome.runtime.sendMessage({ 
+              type: 'CONTENT_CLEANING_STATS', 
+              llmName: MODEL, 
+              stats: stats, 
+              timestamp: Date.now() 
+            });
+
+            const payload = normalizeResponsePayload(resp, lastResponseHtml);
+            chrome.runtime.sendMessage({
+              type: responseType,
+              llmName: MODEL,
+              answer: payload.text,
+              answerHtml: payload.html,
+              meta: msg.meta || null
+            });
+            sendResponse?.({ status: 'success' });
+          })
+          .catch((err) => {
+            if (err?.code === 'background-force-stop') {
+              sendResponse?.({ status: 'force_stopped' });
+              return;
+            }
+            const errorMessage = err?.message || String(err) || 'Unknown error';
+            chrome.runtime.sendMessage({
+              type: responseType,
+              llmName: MODEL,
+              answer: `Error: ${errorMessage}`,
+              error: { type: err?.type || 'generic_error', message: errorMessage },
+              meta: msg.meta || null
+            });
+            sendResponse?.({ status: 'error', message: errorMessage });
+          });
+        return true;
+      }
+
+      if (msg.action === 'injectPrompt' || msg.action === 'sendPrompt' || msg.action === 'REQUEST_LLM_RESPONSE') {
+        const prompt = msg.prompt || '';
+        injectAndGetResponse(prompt);
+      } else if (msg.action === 'getResponses') {
+        const runManualRefresh = async () => {
+          await withSmartScroll(async () => {
+            const rawText = await waitForDeepSeekReply('', 120000);
+            const cleaned = contentCleaner.clean(rawText);
+            lastResponseHtml = '';
+            const latest = grabLatestAssistantText();
+            if (latest.html) lastResponseHtml = latest.html;
+            sendResult({ text: cleaned, html: lastResponseHtml }, true);
+          }, { keepAliveInterval: 2000, operationTimeout: 120000, debug: false });
+        };
+        runManualRefresh()
+          .then(() => sendResponse && sendResponse({ status: 'manual_refresh_dispatched' }))
+          .catch((err) => {
+            if (err?.code === 'background-force-stop') {
+              sendResponse && sendResponse({ status: 'force_stopped' });
+              return;
+            }
+            console.error('[DeepSeek] Manual getResponses failed:', err);
+            sendResponse && sendResponse({ status: 'manual_refresh_failed', error: err?.message || 'unknown_error' });
+          });
+        return true;
+      }
+    } catch (e) {
+      console.error('[DeepSeek] Message error:', e);
+      sendResult(e?.message || String(e), false);
+    }
+    return false;
+  };
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  cleanupScope.register?.(() => {
+    try {
+      chrome.runtime.onMessage.removeListener(onRuntimeMessage);
+    } catch (_) {}
+  });
+
+  if (!document.hidden) {
+    // heartbeat disabled
+  }
+
+  window.__deepseekAllCopyV6 = {
+    injectAndGetResponse,
+    contentCleaner
+  };
+
+  console.log('%c[content-deepseek-v6] ✅ READY', 'color: #00ff00; font-weight: bold;');
+})();

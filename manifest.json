@@ -1,0 +1,204 @@
+{
+  "manifest_version": 3,
+  "name": "A_Codex",
+  "version": "2.70.47",
+  "description": "Compares LLMs.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://chat.openai.com/*",
+    "*://chatgpt.com/*",
+    "*://gemini.google.com/*",
+    "*://bard.google.com/*",
+    "*://claude.ai/*",
+    "*://grok.com/*",
+    "*://grok.x.ai/*",
+    "*://x.com/*",
+    "*://x.ai/*",
+    "*://chat.qwen.ai/*",
+    "*://chat.mistral.ai/*",
+    "*://chat.deepseek.com/*",
+    "*://perplexity.ai/*",
+    "*://www.perplexity.ai/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.x.ai/*",
+    "https://api.mistral.ai/*",
+    "https://dashscope.aliyuncs.com/*",
+    "https://api.deepseek.com/*",
+    "https://api.perplexity.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://chat.openai.com/*",
+        "*://chatgpt.com/*",
+        "*://gemini.google.com/*",
+        "*://bard.google.com/*",
+        "*://claude.ai/*",
+        "*://grok.com/*",
+        "*://grok.x.ai/*",
+        "*://x.com/*",
+        "*://x.ai/*",
+        "*://chat.qwen.ai/*",
+        "*://chat.mistral.ai/*",
+        "*://chat.deepseek.com/*",
+        "*://www.perplexity.ai/*",
+        "*://perplexity.ai/*"
+      ],
+      "js": [
+        "content-scripts/content-bootstrap.js",
+        "content-scripts/fetch-monitor.js",
+        "content-scripts/content-utils.js",
+        "scroll-toolkit.js",
+        "humanoid.js",
+        "selector-manager-strategies.js",
+        "selector-manager.js",
+        "content-scripts/pipeline-config.js",
+        "content-scripts/answer-pipeline-selectors.js",
+        "content-scripts/selectors-finder-lite.js",
+        "content-scripts/selectors-metrics.js",
+        "content-scripts/selectors-circuit.js",
+        "content-scripts/pragmatist-core.js",
+        "content-scripts/pipeline-modules.js",
+        "content-scripts/sanity-check.js",
+        "content-scripts/unified-answer-watcher.js",
+        "content-scripts/unified-answer-pipeline.js",
+        "content-scripts/pragmatist-runner.js",
+        "selectors/config-bundle.js",
+        "selectors-config.js",
+        "content-scripts/element-picker.js",
+        "content-scripts/notes-sidebar-inject.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://chat.openai.com/*",
+        "*://chatgpt.com/*"
+      ],
+      "js": [
+        "content-scripts/content-chatgpt.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://www.perplexity.ai/*",
+        "*://perplexity.ai/*"
+      ],
+      "js": [
+        "content-scripts/content-perplexity.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://gemini.google.com/*",
+        "*://bard.google.com/*"
+      ],
+      "js": [
+        "content-scripts/content-gemini.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://claude.ai/*"
+      ],
+      "js": [
+        "content-scripts/content-claude.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://grok.com/*",
+        "*://grok.x.ai/*",
+        "*://x.com/*"
+        ,
+        "*://x.ai/*"
+      ],
+      "js": [
+        "content-scripts/content-grok.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://chat.qwen.ai/*"
+      ],
+      "js": [
+        "content-scripts/content-qwen.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://chat.mistral.ai/*"
+      ],
+      "js": [
+        "content-scripts/content-lechat.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "*://chat.deepseek.com/*"
+      ],
+      "js": [
+        "content-scripts/content-deepseek.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "result_new.html",
+        "styles.css",
+        "results.js",
+        "content-scripts/content-bridge.js",
+        "content-scripts/fetch-monitor-bridge.js",
+        "scroll-toolkit.js",
+        "humanoid.js",
+        "Modifiers/modifier-presets.json",
+        "Modifiers/modifiers.json",
+        "Modifiers/modifiers_product.json",
+        "Modifiers/modifiers_product-manager.json",
+        "Modifiers/modifiers-research.json",
+        "Modifiers/modifiers-research-quick.json",
+        "Modifiers/modifiers_marketing.json",
+        "Modifiers/modifiers_support.json",
+        "Modifiers/modifiers_ideation.json",
+        "Modifiers/modifiers_photo_enhance.json",
+        "system_templates/*",
+        "system_templates/index.json"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

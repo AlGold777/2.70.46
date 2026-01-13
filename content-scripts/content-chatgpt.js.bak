@@ -1,0 +1,1300 @@
+// content-chatgpt.js - Enhanced Version with Advanced Features from Grok Integration
+
+//-- Защита от дублирования --//
+const resolveExtensionVersion = () => {
+  try {
+    return chrome?.runtime?.getManifest?.()?.version || 'unknown';
+  } catch (_) {
+    return 'unknown';
+  }
+};
+if (window.chatgptContentScriptLoaded) {
+    console.warn('[content-chatgpt] Script already loaded, skipping duplicate initialization');
+    throw new Error('Duplicate script load prevented');
+}
+  window.chatgptContentScriptLoaded = {
+    timestamp: Date.now(),
+    version: resolveExtensionVersion(),
+    source: 'content-chatgpt'
+  };
+console.log('[content-chatgpt] First load, initializing...');
+//-- Конец защиты --//
+
+(function () {
+  const MODEL = "GPT";
+  // Pragmatist integration
+  const prag = window.__PragmatistAdapter;
+  const getPragSessionId = () => prag?.sessionId;
+  const getPragPlatform = () => prag?.adapter?.name || MODEL.toLowerCase();
+  const pipelineOverrides = prag ? { sessionId: getPragSessionId(), platform: getPragPlatform() } : {};
+  let isEvaluatorMode = false;
+  let lastResponseSnapshot = '';
+  const getLifecycleMode = () => {
+    if (typeof window !== 'undefined') {
+      if (window.__humanoidActivityMode) return window.__humanoidActivityMode;
+      if (document?.visibilityState === 'hidden') return 'background';
+    }
+    return 'interactive';
+  };
+  const buildLifecycleContext = (prompt = '', extra = {}) => ({
+    promptLength: prompt?.length || 0,
+    evaluator: Boolean(extra.evaluator),
+    mode: extra.mode || getLifecycleMode()
+  });
+  const getForceStopRegistry = () => {
+    if (window.__humanoidForceStopRegistry) {
+      return window.__humanoidForceStopRegistry;
+    }
+    const handlers = new Set();
+    window.__humanoidForceStopRegistry = {
+      register(handler) {
+        if (typeof handler !== 'function') return () => {};
+        handlers.add(handler);
+        return () => handlers.delete(handler);
+      },
+      run(reason) {
+        handlers.forEach((fn) => {
+          try { fn(reason); } catch (_) {}
+        });
+      }
+    };
+    return window.__humanoidForceStopRegistry;
+  };
+  const registerForceStopHandler = (handler) => getForceStopRegistry().register(handler);
+  const handleForceStopMessage = (traceId) => {
+    if (traceId && window.HumanoidEvents?.stop) {
+      try {
+        window.HumanoidEvents.stop(traceId, { status: 'forced', reason: 'background-force-stop' });
+      } catch (_) {}
+    }
+    getForceStopRegistry().run('background-force-stop');
+  };
+
+  const cleanupScope = window.HumanoidCleanup?.createScope?.(`${MODEL.toLowerCase()}-content`) || {
+    trackInterval: (id) => id,
+    trackTimeout: (id) => id,
+    trackObserver: (observer) => observer,
+    trackAbortController: (controller) => controller,
+    register: () => () => {},
+    addEventListener: () => () => {},
+    cleanup: () => {},
+    isCleaned: () => false,
+    getReason: () => null
+  };
+  let scriptStopped = false;
+  const stopContentScript = (reason = 'manual-stop') => {
+    if (scriptStopped) return cleanupScope.getReason?.() || reason;
+    scriptStopped = true;
+    console.warn('[content-chatgpt] Cleanup triggered:', reason);
+    try {
+      getForceStopRegistry().run(reason);
+    } catch (_) {}
+    try {
+      cleanupScope.cleanup?.(reason);
+    } catch (err) {
+      console.warn('[content-chatgpt] Cleanup scope failed', err);
+    }
+    try {
+      window.chatgptContentScriptLoaded = null;
+    } catch (_) {}
+    return reason;
+  };
+  window.__cleanup_chatgpt = stopContentScript;
+  cleanupScope.addEventListener?.(window, 'pagehide', () => stopContentScript('pagehide'));
+  cleanupScope.addEventListener?.(window, 'beforeunload', () => stopContentScript('beforeunload'));
+
+const sleep = (ms) => (window.ContentUtils?.sleep ? window.ContentUtils.sleep(ms) : new Promise((r) => setTimeout(r, ms)));
+const getHumanoid = () => (typeof window !== 'undefined' ? window.Humanoid : null);
+const isUserInteracting = () => {
+  if (document.hidden) return true;
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+};
+const keepAliveMutex = (() => {
+  const key = '__keepAliveMutex';
+  if (window[key]) return window[key];
+  let locked = false;
+  const queue = [];
+  const run = async (fn) => {
+    if (locked) await new Promise((res) => queue.push(res));
+    locked = true;
+    try { return await fn(); } finally {
+      locked = false;
+      const next = queue.shift();
+      if (next) next();
+    }
+  };
+  const mutex = { run };
+  window[key] = mutex;
+  return mutex;
+})();
+
+const runLifecycle = (source, context, executor) => {
+  if (typeof window.withHumanoidActivity === 'function') {
+    return window.withHumanoidActivity(source, context, executor);
+  }
+  return executor({
+    traceId: null,
+    heartbeat: () => {},
+    stop: () => {},
+    error: () => {}
+  });
+};
+
+const pipelineExpectedLength = (text = '') => {
+  const len = (text || '').length;
+  if (len > 4000) return 'veryLong';
+  if (len > 2000) return 'long';
+  if (len > 800) return 'medium';
+  return 'short';
+};
+
+async function tryChatgptPipeline(promptText = '', lifecycle = {}) {
+  const { heartbeat, stop } = lifecycle || {};
+  if (!window.UnifiedAnswerPipeline) return null;
+  heartbeat?.({
+    stage: 'start',
+    expectedLength: pipelineExpectedLength(promptText),
+    pipeline: 'UnifiedAnswerPipeline'
+  });
+  try {
+    const pipeline = new window.UnifiedAnswerPipeline('gpt', Object.assign({
+      expectedLength: pipelineExpectedLength(promptText)
+    }, pipelineOverrides));
+    const result = await pipeline.execute();
+    if (result?.success && result.answer) {
+      heartbeat?.({
+        stage: 'success',
+        answerLength: result.answer.length,
+        pipeline: 'UnifiedAnswerPipeline'
+      });
+      if (typeof stop === 'function') {
+        await stop({
+          status: 'success',
+          source: 'pipeline',
+          answer: result.answer,
+          answerLength: result.answer.length
+        });
+      }
+      return result;
+    }
+    heartbeat?.({
+      stage: 'empty',
+      status: 'no-answer',
+      pipeline: 'UnifiedAnswerPipeline'
+    });
+  } catch (err) {
+    heartbeat?.({
+      stage: 'error',
+      error: err?.message || String(err),
+      pipeline: 'UnifiedAnswerPipeline'
+    });
+    console.warn('[content-chatgpt] UnifiedAnswerPipeline failed, falling back to manual watcher', err);
+  }
+  return null;
+}
+
+  function triggerInputEvents(element) {
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function fallbackTypeInput(input, text) {
+    try {
+      input.focus({ preventScroll: true });
+    } catch (_) {
+      input.focus?.();
+    }
+    await sleep(300);
+    if (input.tagName === 'TEXTAREA') {
+      input.value = '';
+      triggerInputEvents(input);
+      await sleep(100);
+      input.value = text;
+    } else {
+      input.textContent = '';
+      triggerInputEvents(input);
+      await sleep(100);
+      input.textContent = text;
+    }
+    triggerInputEvents(input);
+    await sleep(150);
+  }
+
+  async function humanTypeInput(input, text, options = {}) {
+    const humanoid = getHumanoid();
+    if (humanoid?.typeText) {
+      try {
+        await humanoid.typeText(input, text, options);
+        return;
+      } catch (err) {
+        console.warn('[content-chatgpt] Humanoid.typeText failed, falling back', err);
+      }
+    }
+    await fallbackTypeInput(input, text);
+  }
+
+  async function humanClick(element) {
+    const humanoid = getHumanoid();
+    if (!element) return;
+    if (humanoid?.click) {
+      try {
+        await humanoid.click(element);
+        return;
+      } catch (err) {
+        console.warn('[content-chatgpt] Humanoid.click failed, falling back', err);
+      }
+    }
+    element.click();
+  }
+
+async function humanRead(duration = 480) {
+  const humanoid = getHumanoid();
+  if (humanoid?.readPage) {
+    try {
+      await humanoid.readPage(duration);
+      } catch (err) {
+        console.warn('[content-chatgpt] Humanoid.readPage failed', err);
+      }
+  }
+}
+
+const parseDataUrlToBytes = (dataUrl = '') => {
+  try {
+    const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+    const base64Part = match ? match[2] : dataUrl;
+    const binary = atob(base64Part || '');
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch (err) {
+    console.warn('[content-chatgpt] Failed to parse data URL', err);
+    return null;
+  }
+};
+
+const hydrateAttachments = (raw = []) => {
+  return raw
+    .map((item) => {
+      if (!item || !item.name || !item.base64) return null;
+      try {
+        const bytes = parseDataUrlToBytes(item.base64);
+        if (!bytes) return null;
+        return new File([bytes], item.name, { type: item.type || 'application/octet-stream' });
+      } catch (err) {
+        console.warn('[content-chatgpt] Failed to hydrate attachment', item?.name, err);
+        return null;
+      }
+    })
+    .filter(Boolean);
+};
+
+async function attachFilesToComposer(target, attachments = []) {
+  if (!attachments || !attachments.length) return false;
+  const files = hydrateAttachments(attachments).slice(0, 5);
+  if (!files.length) return false;
+
+  const makeDataTransfer = () => {
+    const dt = new DataTransfer();
+    files.forEach((f) => {
+      try { dt.items.add(f); } catch (_) {}
+    });
+    return dt;
+  };
+
+  const dispatchDropSequence = async (el) => {
+    if (!el) return false;
+    const dt = makeDataTransfer();
+    try {
+      const events = ['dragenter', 'dragover', 'drop'];
+      for (const type of events) {
+        const ev = new DragEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: dt
+        });
+        el.dispatchEvent(ev);
+        await sleep(40);
+      }
+      await sleep(1400);
+      return true;
+    } catch (err) {
+      console.warn('[content-chatgpt] drop dispatch failed', err);
+      return false;
+    }
+  };
+
+  const primaryTarget = target || document.querySelector('textarea, [contenteditable="true"]');
+  if (await dispatchDropSequence(primaryTarget)) {
+    return true;
+  }
+  if (await dispatchDropSequence(primaryTarget?.parentElement)) {
+    return true;
+  }
+
+  const attachButtonSelectors = [
+    'button[aria-label*="Attach"]',
+    'button[data-testid*="attach"]',
+    'button[data-testid*="upload"]',
+    'button[aria-label*="Upload"]'
+  ];
+  const inputSelectors = [
+    'input[type="file"][accept*="image"]',
+    'input[type="file"][accept*="pdf"]',
+    'input[type="file"]'
+  ];
+
+  const waitForElement = async (selectors, timeoutMs = 3000, intervalMs = 150) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) return el;
+      }
+      await sleep(intervalMs);
+    }
+    return null;
+  };
+
+  const attachButton = await waitForElement(attachButtonSelectors, 1200, 120);
+  if (attachButton) {
+    try {
+      attachButton.click();
+      await sleep(300);
+    } catch (_) {}
+  }
+
+  let fileInput = await waitForElement(inputSelectors, 3000, 120);
+  if (!fileInput) {
+    console.warn('[content-chatgpt] File input not found, skipping attachments');
+    return false;
+  }
+
+  const dt = makeDataTransfer();
+  try {
+    fileInput.files = dt.files;
+  } catch (err) {
+    console.warn('[content-chatgpt] Failed to set files on input', err);
+  }
+
+  try {
+    fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+  } catch (err) {
+    console.warn('[content-chatgpt] dispatch input/change failed', err);
+  }
+
+  try {
+    fileInput.focus?.({ preventScroll: true });
+  } catch (_) {
+    try { fileInput.focus?.(); } catch (_) {}
+  }
+
+  await sleep(1800);
+  return true;
+}
+
+const startDriftFallback = (intensity = 'soft') => {
+  const humanoid = getHumanoid();
+  if (humanoid?.startAntiSleepDrift) {
+    humanoid.startAntiSleepDrift(intensity);
+    return;
+  }
+  window.scrollBy({ top: (Math.random() > 0.5 ? 1 : -1) * (intensity === 'hard' ? 24 : 12), behavior: 'auto' });
+};
+
+const stopDriftFallback = () => {
+  const humanoid = getHumanoid();
+  humanoid?.stopAntiSleepDrift?.();
+};
+
+const createKeepAliveHeartbeat = (source) => {
+  let traceId = null;
+  let cleanupTimer = null;
+  return (meta = {}) => {
+    const lifecycle = window.HumanoidEvents;
+    if (!lifecycle?.start) return;
+    if (!traceId) {
+      try {
+        traceId = lifecycle.start(source, { mode: 'anti-sleep', source });
+      } catch (err) {
+        console.warn(`[${source}] keepalive trace failed`, err);
+        return;
+      }
+    }
+    try {
+      lifecycle.heartbeat(traceId, meta.progress || 0, Object.assign({ phase: 'keepalive-pulse' }, meta));
+    } catch (err) {
+      console.warn(`[${source}] keepalive heartbeat failed`, err);
+    }
+    if (cleanupTimer) clearTimeout(cleanupTimer);
+    cleanupTimer = setTimeout(() => {
+      try { lifecycle.stop(traceId, { status: 'idle' }); } catch (_) {}
+      traceId = null;
+    }, 8000);
+  };
+};
+const emitKeepAliveHeartbeat = createKeepAliveHeartbeat(`${MODEL.toLowerCase()}:keepalive`);
+
+const runAntiSleepPulse = (intensity = 'soft') => {
+  emitKeepAliveHeartbeat({ action: 'keep-alive-ping', intensity, model: MODEL });
+  const delta = intensity === 'hard' ? 28 : intensity === 'medium' ? 16 : 8;
+  try {
+    const Toolkit = window.__UniversalScrollToolkit;
+    if (Toolkit) {
+      const tk = new Toolkit({ idleThreshold: 800, driftStepMs: 40 });
+      tk.keepAliveTick?.((Math.random() > 0.5 ? 1 : -1) * delta);
+      return;
+    }
+  } catch (_) {}
+  if (!window.__organicDriftFallback) {
+      window.__organicDriftFallback = (() => {
+        let rafId = null;
+        return (speed) => {
+          if (rafId) cancelAnimationFrame(rafId);
+          const duration = 1000 + Math.random() * 600;
+          const start = performance.now();
+          let phase = Math.random() * Math.PI * 2;
+          const step = (ts) => {
+            const elapsed = ts - start;
+            phase += 0.07;
+            const offset = Math.sin(phase) * 0.8 * speed;
+            window.scrollBy({ top: offset, behavior: 'auto' });
+            if (elapsed < duration) {
+              rafId = requestAnimationFrame(step);
+            } else {
+              rafId = null;
+            }
+          };
+          rafId = requestAnimationFrame(step);
+        };
+      })();
+  }
+  window.__organicDriftFallback(intensity === 'hard' ? 1.5 : intensity === 'medium' ? 1.1 : 0.8);
+  startDriftFallback(intensity);
+};
+
+const stopAntiSleep = () => {
+  stopDriftFallback();
+};
+
+const chatgptScrollCoordinator = window.ScrollCoordinator
+  ? new window.ScrollCoordinator({
+      source: `${MODEL.toLowerCase()}-smart-scroll`,
+      getLifecycleMode,
+      registerForceStopHandler,
+      startDrift: () => startDriftFallback('soft'),
+      stopDrift: () => stopDriftFallback(),
+      logPrefix: `[${MODEL}] SmartScroll`
+    })
+  : null;
+
+  async function withSmartScroll(asyncOperation, options = {}) {
+    if (window.ContentUtils?.withSmartScroll) {
+      return window.ContentUtils.withSmartScroll(asyncOperation, { coordinator: chatgptScrollCoordinator, ...options });
+    }
+    if (chatgptScrollCoordinator) {
+      return chatgptScrollCoordinator.run(asyncOperation, options);
+    }
+    return asyncOperation();
+  }
+
+  const MONITORED_HOSTS = new Set(['chat.openai.com', 'api.openai.com']);
+  window.setupHumanoidFetchMonitor?.(MODEL, ({ status, retryAfter, url }) => {
+    if (status !== 429) return;
+    let hostname = '';
+    try {
+      hostname = new URL(url || '', window.location.origin).hostname;
+    } catch (_) {}
+    if (hostname && !MONITORED_HOSTS.has(hostname)) return;
+    const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 || 60000 : 60000;
+    chrome.runtime.sendMessage({
+      type: 'LLM_RESPONSE',
+      llmName: MODEL,
+      answer: 'Error: Rate limit detected. Please wait.',
+      error: {
+        type: 'rate_limit',
+        message: `HTTP 429 detected. Suggested wait time: ${waitTime}ms`,
+        waitTime
+      }
+    });
+  });
+
+  //-- Advanced Content Cleaning System --//
+  class ContentCleaner {
+      constructor() {
+          this.cleaningRules = this.initializeCleaningRules();
+          this.cleaningStats = { elementsRemoved: 0, charactersRemoved: 0, rulesApplied: 0 };
+      }
+
+      initializeCleaningRules() {
+          return {
+              uiPhrases: [
+                  /\b(Send|Menu|Settings|New chat|Clear|Like|Reply|Copy|Share|Follow|Subscribe)\b/gi,
+                  /\b(Upload|Download|Save|Delete|Edit|Search|Filter|Sort)\b/gi,
+                  /\b(ChatGPT|OpenAI|GPT|Grok|Claude|Gemini|Perplexity)\b/gi
+              ],
+              timePatterns: [
+                  /\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b/gi,
+                  /\b\d+\s*(?:hours?|minutes?|seconds?)\s*ago\b/gi,
+                  /\b(?:Just now|Yesterday|Today|Tomorrow)\b/gi
+              ],
+              formattingSymbols: [
+                  /\xa0/g, 
+                  /&nbsp;/g, 
+                  /&[a-z]+;/gi
+              ],
+              urlPatterns: [
+                  /\bhttps?:\/\/[^\s<>"]+?\b/gi, 
+                  /\bwww\.[^\s<>"]+?\b/gi
+              ]
+          };
+      }
+
+      cleanContent(content, options = {}) {
+          const startTime = Date.now();
+          this.cleaningStats = { elementsRemoved: 0, charactersRemoved: 0, rulesApplied: 0 };
+          console.log('[ContentCleaner] Starting content cleaning, initial length:', content.length);
+
+          let textContent = content;
+          if (/<\/?[a-z][\s\S]*>/i.test(content)) {
+              try {
+                  const parser = new DOMParser();
+                  const doc = parser.parseFromString(content, 'text/html');
+                  doc.querySelectorAll('script,style,svg,canvas,noscript,header,footer,nav,aside,[aria-hidden="true"]').forEach(el => el.remove());
+                  textContent = doc.body?.textContent || '';
+              } catch (err) {
+                  console.warn('[ContentCleaner] DOMParser failed in ChatGPT cleaner, falling back to text extraction', err);
+                  const fallbackDiv = document.createElement('div');
+                  fallbackDiv.textContent = content;
+                  textContent = fallbackDiv.textContent || '';
+              }
+          }
+
+          let cleanedContent = this.cleanTextContent(textContent, options);
+
+          if (options.maxLength && cleanedContent.length > options.maxLength) {
+              cleanedContent = this.applyLengthLimit(cleanedContent, options.maxLength);
+          }
+
+          const processingTime = Date.now() - startTime;
+          console.log(`[ContentCleaner] Cleaning completed in ${processingTime}ms. Final length: ${cleanedContent.length}`);
+          return cleanedContent;
+      }
+
+      cleanTextContent(textContent, options) {
+          let cleanedText = textContent;
+          const allRules = [
+              ...this.cleaningRules.uiPhrases,
+              ...this.cleaningRules.timePatterns,
+              ...this.cleaningRules.urlPatterns,
+              ...this.cleaningRules.formattingSymbols
+          ];
+          
+          allRules.forEach(pattern => {
+              const originalLength = cleanedText.length;
+              cleanedText = cleanedText.replace(pattern, ' ');
+              this.recordRemoval(originalLength - cleanedText.length);
+          });
+
+          return this.finalNormalization(cleanedText);
+      }
+
+      recordRemoval(charactersRemoved) {
+          if (charactersRemoved > 0) {
+              this.cleaningStats.charactersRemoved += charactersRemoved;
+              this.cleaningStats.rulesApplied++;
+          }
+      }
+
+      applyLengthLimit(content, maxLength) {
+          if (content.length <= maxLength) return content;
+          const truncated = content.substring(0, maxLength);
+          const lastSentenceEnd = Math.max(
+              truncated.lastIndexOf('. '), 
+              truncated.lastIndexOf('! '),
+              truncated.lastIndexOf('? '), 
+              truncated.lastIndexOf('\n\n')
+          );
+          if (lastSentenceEnd > maxLength * 0.7) {
+              return truncated.substring(0, lastSentenceEnd + 1) + '\n\n[Content truncated]';
+          }
+          return truncated + '\n\n[Content truncated]';
+      }
+
+      finalNormalization(text) {
+          return text
+              .replace(/\n\s*\n\s*\n/g, '\n\n')
+              .replace(/[ \t]+/g, ' ')
+              .trim();
+      }
+
+      getCleaningStats() {
+          return { ...this.cleaningStats };
+      }
+  }
+  
+  window.contentCleaner = new ContentCleaner();
+
+  //-- Metrics Collection System --//
+  class MetricsCollector {
+      constructor() {
+          this.metrics = {
+              operations: [],
+              timings: {},
+              errors: []
+          };
+          this.startTime = Date.now();
+          this.operationCounter = 0;
+          
+          this.reportTimer = cleanupScope.trackInterval(setInterval(() => this.sendReport(), 300000));
+      }
+
+      startOperation(name, context = {}) {
+          const opId = `${name}_${this.operationCounter++}_${Date.now()}`;
+          const operation = {
+              id: opId,
+              name,
+              start: Date.now(),
+              end: null,
+              duration: null,
+              success: null,
+              metadata: context || {},
+              lifecycleTraceId: null
+          };
+          const events = window.HumanoidEvents;
+          if (events?.start) {
+              try {
+                  operation.lifecycleTraceId = events.start(`metrics:${name}`, {
+                      mode: getLifecycleMode(),
+                      operation: name
+                  });
+              } catch (_) {}
+          }
+          this.metrics.operations.push(operation);
+          return opId;
+      }
+
+      endOperation(opId, success, metadata = {}) {
+          const op = this.metrics.operations.find(o => o.id === opId);
+          if (op) {
+              op.end = Date.now();
+              op.duration = op.end - op.start;
+              op.success = success;
+              op.metadata = metadata;
+              if (op.lifecycleTraceId && window.HumanoidEvents?.stop) {
+                  try {
+                      window.HumanoidEvents.stop(op.lifecycleTraceId, {
+                          status: success ? 'success' : 'failed',
+                          metadata
+                      });
+                  } catch (_) {}
+                  op.lifecycleTraceId = null;
+              }
+          }
+      }
+
+      recordTiming(key, duration) {
+          if (!this.metrics.timings[key]) {
+              this.metrics.timings[key] = [];
+          }
+          this.metrics.timings[key].push(duration);
+      }
+
+      recordError(error, context, operationId = null) {
+          this.metrics.errors.push({
+              message: error?.message || String(error),
+              context: context,
+              timestamp: Date.now()
+          });
+          if (this.metrics.errors.length > 10) {
+              this.metrics.errors.shift();
+          }
+          if (operationId) {
+              const op = this.metrics.operations.find(o => o.id === operationId);
+              if (op?.lifecycleTraceId && window.HumanoidEvents?.error) {
+                  try {
+                      window.HumanoidEvents.error(op.lifecycleTraceId, error, true);
+                  } catch (_) {}
+              }
+          }
+      }
+
+      getReport() {
+          const totalOps = this.metrics.operations.length;
+          const successfulOps = this.metrics.operations.filter(op => op.success === true).length;
+          const failedOps = this.metrics.operations.filter(op => op.success === false).length;
+
+          const avgTimings = {};
+          for (const key in this.metrics.timings) {
+              const times = this.metrics.timings[key];
+              avgTimings[key] = times.reduce((a, b) => a + b, 0) / times.length;
+          }
+
+          return {
+              uptime: Date.now() - this.startTime,
+              operations: {
+                  total: totalOps,
+                  successful: successfulOps,
+                  failed: failedOps,
+                  successRate: totalOps > 0 ? `${((successfulOps / totalOps) * 100).toFixed(2)}%` : '0%'
+              },
+              timings: avgTimings,
+              errors: this.metrics.errors.slice(-10),
+              timestamp: Date.now()
+          };
+      }
+
+      sendReport() {
+          try {
+              chrome.runtime.sendMessage({
+                  type: 'METRICS_REPORT',
+                  llmName: MODEL,
+                  metrics: this.getReport()
+              });
+          } catch (e) {
+              console.warn('[MetricsCollector] Failed to send report:', e);
+          }
+      }
+  }
+
+  const metricsCollector = new MetricsCollector();
+
+  //-- ОРИГИНАЛЬНАЯ ПРОСТАЯ ЛОГИКА ИЗ content-chatgpt.js --//
+
+  function isElementInteractable(element) {
+      if (window.ContentUtils?.isElementInteractable) return window.ContentUtils.isElementInteractable(element);
+      if (!element) return false;
+      if (element.offsetParent === null) return false;
+      if (element.getAttribute('disabled') !== null) return false;
+      if (element.disabled === true) return false;
+      if (element.style.display === 'none') return false;
+      if (element.style.visibility === 'hidden') return false;
+      if (element.style.opacity === '0') return false;
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return false;
+      return rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
+  }
+
+  // Self-Healing Selector Logic (упрощенная версия)
+  async function findAndCacheElement(selectorKey, selectorArray, timeout = 30000) {
+      if (window.ContentUtils?.findAndCacheElement) {
+          const found = await window.ContentUtils.findAndCacheElement(selectorKey, selectorArray, { timeout, model: MODEL, metricsCollector });
+          if (found) return found;
+      }
+      const storageKey = `selector_cache_${MODEL}_${selectorKey}`;
+      try {
+          const result = await chrome.storage.local.get(storageKey);
+          const cachedSelector = result[storageKey];
+          if (cachedSelector) {
+              const el = document.querySelector(cachedSelector);
+              if (el && isElementInteractable(el)) {
+                  console.log(`[Self-Healing] Found element using cached selector for '${selectorKey}'`);
+                  return el;
+              }
+          }
+      } catch (e) { console.warn('[content-chatgpt] Storage access failed, continuing without cache'); }
+
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+          for (const selector of selectorArray) {
+              try {
+                  const el = document.querySelector(selector);
+                  if (el && isElementInteractable(el)) {
+                      console.log(`[Self-Healing] Found element with '${selector}'. Caching for '${selectorKey}'.`);
+                      try { await chrome.storage.local.set({ [storageKey]: selector }); } catch (e) {}
+                      return el;
+                  }
+              } catch (error) { console.warn(`[content-chatgpt] Selector error for ${selector}:`, error); }
+          }
+          await sleep(1000);
+      }
+      throw new Error(`Element not found for '${selectorKey}' with any selector`);
+  }
+
+  function sendResult(text, ok = true) {
+    const messageType = isEvaluatorMode ? 'EVALUATOR_RESPONSE' : 'LLM_RESPONSE';
+    
+    const message = {
+      type: messageType,
+      answer: ok ? text : `Ошибка: ${text}`
+    };
+    
+    if (!isEvaluatorMode) {
+      message.llmName = MODEL;
+    }
+    
+    console.log(`[CONTENT-GPT] Sending ${messageType}:`, text.substring(0, 100) + '...');
+    chrome.runtime.sendMessage(message);
+  }
+
+  // ОРИГИНАЛЬНАЯ ФУНКЦИЯ ОБРАБОТКИ (с улучшенной очисткой)
+  let gptSharedInjection = null;
+  let gptSharedFingerprint = null;
+  let gptSharedStartedAt = 0;
+  const fingerprintPrompt = (prompt = '') => {
+    const s = String(prompt || '');
+    return `${s.length}:${quickHash(s.slice(0, 600))}`;
+  };
+
+  function quickHash(s) {
+    try {
+      let h = 0, i = 0, len = s.length;
+      while (i < len) { h = (h << 5) - h + s.charCodeAt(i++) | 0; }
+      return h >>> 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  const normalizeForComparison = (text = '') => String(text)
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const readComposerValue = (el) => {
+    try {
+      if (!el) return '';
+      if ('value' in el) return String(el.value || '');
+      return String(el.textContent || '');
+    } catch (_) {
+      return '';
+    }
+  };
+
+  const setNativeValue = (el, value) => {
+    try {
+      const proto = Object.getPrototypeOf(el);
+      const setter =
+        Object.getOwnPropertyDescriptor(proto, 'value')?.set ||
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set ||
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(el, value);
+      else el.value = value;
+    } catch (_) {
+      try { el.value = value; } catch (_) {}
+    }
+  };
+
+  async function fastSetPrompt(inputField, prompt) {
+    const text = String(prompt ?? '');
+    try {
+      inputField.focus?.({ preventScroll: true });
+    } catch (_) {
+      try { inputField.focus?.(); } catch (_) {}
+    }
+    if ('value' in inputField) {
+      setNativeValue(inputField, text);
+      try {
+        inputField.selectionStart = inputField.selectionEnd = inputField.value.length;
+      } catch (_) {}
+    } else {
+      inputField.textContent = text;
+    }
+    try {
+      inputField.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertFromPaste' }));
+    } catch (_) {
+      inputField.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    inputField.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(120);
+    return readComposerValue(inputField);
+  }
+
+  async function injectAndGetResponse(prompt, attachments = []) {
+    const fp = fingerprintPrompt(prompt);
+    if (gptSharedInjection && fp === gptSharedFingerprint && Date.now() - gptSharedStartedAt < 15000) {
+      console.warn('[CONTENT-GPT] Reusing in-flight injection promise');
+      return gptSharedInjection;
+    }
+    gptSharedFingerprint = fp;
+    gptSharedStartedAt = Date.now();
+
+    const opPromise = runLifecycle('chatgpt:inject', buildLifecycleContext(prompt, { evaluator: isEvaluatorMode }), async (activity) => {
+      console.log(`[CONTENT-GPT] Starting ChatGPT injection process, evaluator mode: ${isEvaluatorMode}`);
+      try {
+        // Ждём загрузки UI
+        await sleep(450);
+
+        activity.heartbeat(0.05, { phase: 'ui-analysis' });
+
+        // ДИАГНОСТИКА: проверяем что есть на странице
+        console.log('[DEBUG] Page analysis:');
+        console.log('- All textareas:', document.querySelectorAll('textarea').length);
+        console.log('- All contenteditable:', document.querySelectorAll('[contenteditable="true"]').length);
+        console.log('- Form elements:', document.querySelectorAll('form').length);
+        
+        // Ищем поле ввода с РАСШИРЕННЫМИ селекторами
+        const inputSelectors = [
+          // Modern ChatGPT selectors
+          'textarea[id^="prompt-textarea"]',
+          'textarea[placeholder*="Message"]',
+          'textarea[placeholder*="message"]',
+          'textarea[data-id="root"]',
+          
+          // Legacy selectors
+          'textarea[data-testid="conversation-input"]',
+          'textarea[aria-label="Message ChatGPT"]',
+          'textarea#prompt-textarea',
+          'textarea.prompt-textarea',
+          
+          // ContentEditable variants
+          'div[contenteditable="true"][role="textbox"]',
+          'div[contenteditable="true"][data-testid*="composer"]',
+          'div[contenteditable="true"]',
+          
+          // Fallback: ANY textarea or contenteditable
+          'textarea',
+          '[contenteditable="true"]'
+        ];
+
+        console.log('[CONTENT-GPT] Looking for input field...');
+        activity.heartbeat(0.15, { phase: 'input-search' });
+        
+        // Пробуем найти вручную если Self-Healing не сработает
+        let inputField = null;
+        try {
+            inputField = await findAndCacheElement('inputField', inputSelectors, 10000);
+        } catch (err) {
+            console.warn('[CONTENT-GPT] Self-Healing failed, trying manual search...');
+            
+            // Manual fallback: ищем любой видимый textarea/contenteditable
+            const allTextareas = Array.from(document.querySelectorAll('textarea'));
+            const allContentEditables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+            const allInputs = [...allTextareas, ...allContentEditables];
+            
+            console.log(`[DEBUG] Found ${allInputs.length} potential input fields`);
+            
+            for (const el of allInputs) {
+                if (isElementInteractable(el)) {
+                    console.log('[DEBUG] Found interactable input:', {
+                        tag: el.tagName,
+                        id: el.id,
+                        placeholder: el.placeholder,
+                        contenteditable: el.getAttribute('contenteditable')
+                    });
+                    inputField = el;
+                    break;
+                }
+            }
+            
+            if (!inputField) {
+                throw { type: 'selector_not_found', message: 'ChatGPT input field not found after manual search' };
+            }
+        }
+        
+        console.log('[CONTENT-GPT] Input field found. Injecting prompt...');
+        const attached = await attachFilesToComposer(inputField, Array.isArray(attachments) ? attachments : []);
+        if (attached) {
+          console.log('[CONTENT-GPT] Files attached via paste/drop');
+          await sleep(400);
+        }
+        const forced = await fastSetPrompt(inputField, prompt);
+        const promptHead = normalizeForComparison(prompt).slice(0, 120);
+        const forcedOk = promptHead && normalizeForComparison(forced).includes(promptHead);
+        if (!forcedOk) {
+          await humanRead(350);
+          await humanTypeInput(inputField, prompt, { wpm: 125 });
+        }
+        activity.heartbeat(0.35, { phase: 'typing' });
+
+        console.log('[CONTENT-GPT] Prompt injected, waiting for UI to update...');
+        await sleep(120);
+
+        // Ищем кнопку отправки с РАСШИРЕННЫМИ селекторами
+        const sendButtonSelectors = [
+          // Modern ChatGPT
+          'button[data-testid="send-button"]',
+          'button[data-testid="fruitjuice-send-button"]',
+          'button[data-testid="composer-send-button"]',
+          'button[data-testid="send-message-button"]',
+          'button[data-testid="pegasus-send-button"]',
+          'button[data-testid*="send-button"]',
+          'button[data-testid*="send"]',
+          'button[aria-label*="Send" i]',
+          'button[aria-label*="send" i]',
+          'button[class*="SendButton"]',
+          
+          // Icon-based
+          'button:has(svg[data-testid*="send"])',
+          'button:has(svg[data-icon="send"])',
+          'button:has(svg[data-icon="arrow-up"])',
+          
+          // Role-based (new UI sometimes renders div role="button")
+          'div[role="button"][data-testid*="send"]',
+          'div[role="button"][aria-label*="send" i]',
+          'div[role="button"]:has(svg[data-icon="send"])',
+          
+          // Form-based
+          'form button[type="submit"]',
+          'form [role="button"][aria-label*="send" i]'
+        ];
+
+        console.log('[CONTENT-GPT] Looking for send button...');
+        activity.heartbeat(0.45, { phase: 'send-button-search' });
+        
+        const resolveSendButton = async () => {
+          const scope = inputField.closest('form') || inputField.closest('[data-testid*="composer"]') || inputField.parentElement || document;
+          for (const sel of sendButtonSelectors) {
+            let el = null;
+            try { el = scope.querySelector?.(sel) || document.querySelector(sel); } catch (_) { el = null; }
+            if (!el) continue;
+            if (!isElementInteractable(el)) continue;
+            const ariaDisabled = el.getAttribute?.('aria-disabled');
+            if (el.disabled || ariaDisabled === 'true') continue;
+            const aria = String(el.getAttribute?.('aria-label') || '').toLowerCase();
+            const testid = String(el.getAttribute?.('data-testid') || '').toLowerCase();
+            if (testid.includes('send') || aria.includes('send') || aria.includes('submit') || el.type === 'submit') {
+              return el;
+            }
+          }
+          return null;
+        };
+
+        const tryEnterSend = async () => {
+          try { inputField.focus?.({ preventScroll: true }); } catch (_) { try { inputField.focus?.(); } catch (_) {} }
+          const down = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true });
+          const up = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true });
+          inputField.dispatchEvent(down);
+          inputField.dispatchEvent(up);
+        };
+
+        const confirmChatgptSend = async () => {
+          const before = document.querySelectorAll('[data-message-author-role="user"]').length;
+          const deadline = Date.now() + 1600;
+          while (Date.now() < deadline) {
+            const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i]');
+            if (stopBtn && isElementInteractable(stopBtn)) return true;
+            const after = document.querySelectorAll('[data-message-author-role="user"]').length;
+            if (after > before) return true;
+            const val = String(inputField.value ?? inputField.textContent ?? '').trim();
+            if (!val.length) return true;
+            await sleep(120);
+          }
+          return false;
+        };
+
+        // Wait a bit for Send to become enabled after React state updates
+        let sendButton = null;
+        const enableDeadline = Date.now() + 2500;
+        while (Date.now() < enableDeadline) {
+          sendButton = await resolveSendButton();
+          if (sendButton) break;
+          await sleep(120);
+        }
+        if (sendButton) {
+          console.log('[CONTENT-GPT] Clicking send button');
+          await humanClick(sendButton);
+        } else {
+          console.warn('[CONTENT-GPT] Send button not found, trying Enter fallback');
+          await tryEnterSend();
+        }
+
+        let confirmed = await confirmChatgptSend();
+        if (!confirmed && sendButton) {
+          console.warn('[CONTENT-GPT] Send not confirmed, trying Enter fallback');
+          await tryEnterSend();
+          confirmed = await confirmChatgptSend();
+        }
+        if (!confirmed) {
+          throw { type: 'send_failed', message: 'ChatGPT send not confirmed' };
+        }
+        activity.heartbeat(0.5, { phase: 'send-dispatched' });
+        try { chrome.runtime.sendMessage({ type: 'PROMPT_SUBMITTED', llmName: MODEL, ts: Date.now() }); } catch (_) {}
+
+        console.log('[CONTENT-GPT] Message sent, waiting for response...');
+        activity.heartbeat(0.6, { phase: 'waiting-response' });
+        let pipelineAnswer = null;
+        await tryChatgptPipeline(prompt, {
+          heartbeat: (meta = {}) => activity.heartbeat(0.75, Object.assign({ phase: 'pipeline' }, meta)),
+          stop: async ({ answer }) => {
+            console.log('[CONTENT-GPT] UnifiedAnswerPipeline captured answer, skipping legacy watcher');
+            const cleanedResponse = window.contentCleaner.cleanContent(answer, {
+                maxLength: 50000
+            });
+            lastResponseSnapshot = cleanedResponse;
+            pipelineAnswer = cleanedResponse;
+            activity.stop({ status: 'success', answerLength: cleanedResponse.length, source: 'pipeline' });
+            return cleanedResponse;
+          }
+        });
+        if (pipelineAnswer) {
+          return pipelineAnswer;
+        }
+        throw new Error('Pipeline did not return answer');
+
+      } catch (error) {
+        if (error?.code === 'background-force-stop') {
+          activity.error(error, false);
+          throw error;
+        }
+
+        // Only fatal errors (selector/injection) set error status
+        // Other errors handled by handleLLMResponse
+        const isFatal = String(error).includes('selector') || String(error).includes('injection');
+
+        if (isFatal) {
+          activity.error(error, true);
+        } else {
+          activity.stop({ status: 'error' });
+        }
+
+        throw error;
+      }
+    });
+
+    gptSharedInjection = opPromise;
+    opPromise.finally(() => {
+      if (gptSharedInjection === opPromise) gptSharedInjection = null;
+    });
+    return opPromise;
+  }
+
+  // ОБРАБОТЧИК СООБЩЕНИЙ (с улучшенной обработкой)
+  const onRuntimeMessage = (message, sender, sendResponse) => {
+    if (!message) return false;
+    console.log('[CONTENT-GPT] Received:', message.type);
+    if (message?.type === 'STOP_AND_CLEANUP') {
+      handleForceStopMessage(message.payload?.traceId);
+      stopContentScript('manual-toggle');
+      if (typeof sendResponse === 'function') {
+        sendResponse({ status: 'cleaned', llmName: MODEL });
+      }
+      return false;
+    }
+    if (message?.type === 'HUMANOID_FORCE_STOP') {
+      handleForceStopMessage(message.payload?.traceId);
+      if (typeof sendResponse === 'function') {
+        sendResponse({ status: 'force_stop_ack' });
+      }
+      return false;
+    }
+    if (message?.action === 'getResponses') {
+        const pingId = generatePingId();
+        sendResponse?.({ status: 'manual_refresh_started', pingId });
+        (async () => {
+            try {
+                const latestMarkup = grabLatestAssistantMarkup();
+                const cleaned = window.contentCleaner.cleanContent(latestMarkup, { maxLength: 50000 });
+                if (cleaned && cleaned !== lastResponseSnapshot) {
+                    lastResponseSnapshot = cleaned;
+                    chrome.runtime.sendMessage({ type: 'LLM_RESPONSE', llmName: MODEL, answer: cleaned });
+                    chrome.runtime.sendMessage({ type: 'MANUAL_PING_RESULT', llmName: MODEL, status: 'success', pingId });
+                } else {
+                    chrome.runtime.sendMessage({ type: 'MANUAL_PING_RESULT', llmName: MODEL, status: 'unchanged', pingId });
+                }
+            } catch (err) {
+                if (err?.code === 'background-force-stop') {
+                    chrome.runtime.sendMessage({
+                        type: 'MANUAL_PING_RESULT',
+                        llmName: MODEL,
+                        status: 'aborted',
+                        pingId
+                    });
+                    return;
+                }
+                chrome.runtime.sendMessage({
+                    type: 'MANUAL_PING_RESULT',
+                    llmName: MODEL,
+                    status: 'failed',
+                    error: err?.message || 'manual refresh failed',
+                    pingId
+                });
+            }
+        })();
+        return true;
+    }
+    
+    if (message?.type === 'HEALTH_CHECK_PING') {
+        sendResponse({ type: 'HEALTH_CHECK_PONG', pingId: message.pingId, llmName: MODEL });
+        return true;
+    }
+    
+  if (message?.type === 'ANTI_SLEEP_PING') {
+        if (window.__LLMScrollHardStop) {
+          return false;
+        }
+        if (isUserInteracting()) {
+          stopAntiSleep();
+          return false;
+        }
+        keepAliveMutex.run(async () => {
+          runAntiSleepPulse(message.intensity || 'soft');
+        });
+        return false;
+    }
+    
+    if (message?.type === 'GET_ANSWER' || message.type === 'GET_FINAL_ANSWER') {
+      isEvaluatorMode = message.isEvaluator || false;
+      console.log(`[CONTENT-GPT] Received ${message.type}, isEvaluator: ${isEvaluatorMode}`);
+
+      injectAndGetResponse(message.prompt, message.attachments)
+        .then((resp) => {
+          if (message.isFireAndForget) {
+              sendResponse({ status: 'success_fire_and_forget' });
+              return;
+          }
+          
+          const responseType = message.type === 'GET_ANSWER' ? 'LLM_RESPONSE' : 'FINAL_LLM_RESPONSE';
+          
+          // Отправка статистики очистки
+          const stats = window.contentCleaner.getCleaningStats();
+          chrome.runtime.sendMessage({
+              type: 'CONTENT_CLEANING_STATS', 
+              llmName: MODEL, 
+              stats: stats, 
+              timestamp: Date.now()
+          });
+          
+          if (isEvaluatorMode) {
+              sendResult(resp, true);
+          } else {
+              chrome.runtime.sendMessage({ type: responseType, llmName: MODEL, answer: resp });
+          }
+          
+          sendResponse({ status: 'success' });
+        })
+        .catch((err) => {
+          if (err?.code === 'background-force-stop') {
+              sendResponse({ status: 'force_stopped' });
+              return;
+          }
+          const errorMessage = err.message || err?.message || String(err);
+          const responseType = message.type === 'GET_ANSWER' ? 'LLM_RESPONSE' : 'FINAL_LLM_RESPONSE';
+          
+          if (isEvaluatorMode) {
+              sendResult(errorMessage, false);
+          } else {
+              chrome.runtime.sendMessage({
+                  type: responseType, 
+                  llmName: MODEL, 
+                  answer: `Error: ${errorMessage}`,
+                  error: { type: err.type || 'generic_error', message: errorMessage }
+              });
+          }
+          
+          sendResponse({ status: 'error', message: errorMessage });
+        });
+      return true; // Важно для асинхронной обработки
+    }
+    
+    return false;
+  };
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  cleanupScope.register?.(() => {
+    try {
+      chrome.runtime.onMessage.removeListener(onRuntimeMessage);
+    } catch (_) {}
+  });
+
+// БАЗОВЫЙ HEARTBEAT ОТКЛЮЧЕН: используем event-driven anti-sleep
+function startBasicHeartbeat() { return; }
+
+  console.log(`[CONTENT-GPT] Enhanced script loaded and ready`);
+})();
