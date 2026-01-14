@@ -1,8 +1,0 @@
-{
-  "templates": {
-    "Short Mode Modifier": "This is not a standalone template. The following text is automatically appended to your prompt when 'Short' mode is enabled:\n\n---\n\nProvide a very short and concise answer."
-  },
-  "variables": {
-    "Short Mode Modifier": {}
-  }
-}
