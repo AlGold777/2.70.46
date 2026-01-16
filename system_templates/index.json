@@ -1,0 +1,7 @@
+[
+  "summarize_text.json",
+  "code_debugger.json",
+  "email_rewriter.json",
+  "llm_evaluator.json",
+  "short_mode.json"
+]
